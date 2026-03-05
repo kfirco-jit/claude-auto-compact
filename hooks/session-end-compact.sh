@@ -89,7 +89,34 @@ fi
 # Build and run decant
 MODEL=$(config_get '.compaction.model')
 STRIP=$(config_get '.compaction.strip_noise')
+STRATEGY=$(config_get '.compaction.strategy')
 LOG_FILE="$LOG_DIR/compact-$(date +%Y%m%d-%H%M%S).log"
+
+# Determine compaction boundary (--last N or --topic)
+BOUNDARY_ARGS="--last $KEEP_LAST"
+BOUNDARY_DESC="kept last $KEEP_LAST turns"
+if [[ "$STRATEGY" == "auto" ]]; then
+  DECANT_PYTHON="$(dirname "$DECANT_BIN")/../.venv/bin/python3"
+  STRATEGY_SCRIPT="$SCRIPT_DIR/lib/strategy.py"
+  if [[ -x "$DECANT_PYTHON" ]] && [[ -f "$STRATEGY_SCRIPT" ]]; then
+    STRATEGY_RESULT=$("$DECANT_PYTHON" "$STRATEGY_SCRIPT" "$TRANSCRIPT_PATH" "$KEEP_LAST" 2>/dev/null) || true
+    STRATEGY_MODE=$(echo "$STRATEGY_RESULT" | jq -r '.mode // empty' 2>/dev/null)
+    STRATEGY_LAST=$(echo "$STRATEGY_RESULT" | jq -r '.last // empty' 2>/dev/null)
+    # Update keep_last if haiku recommended a different value
+    if [[ -n "$STRATEGY_LAST" ]] && [[ "$STRATEGY_LAST" -gt 0 ]] 2>/dev/null; then
+      KEEP_LAST="$STRATEGY_LAST"
+      BOUNDARY_ARGS="--last $KEEP_LAST"
+      BOUNDARY_DESC="kept last $KEEP_LAST turns"
+    fi
+    if [[ "$STRATEGY_MODE" == "topic" ]]; then
+      STRATEGY_TOPIC=$(echo "$STRATEGY_RESULT" | jq -r '.topic // empty' 2>/dev/null)
+      if [[ -n "$STRATEGY_TOPIC" ]]; then
+        BOUNDARY_ARGS="--topic '$STRATEGY_TOPIC'"
+        BOUNDARY_DESC="topic: $STRATEGY_TOPIC (fallback: last $KEEP_LAST)"
+      fi
+    fi
+  fi
+fi
 
 NOTIFY_ENABLED=$(config_get '.notifications.enabled')
 NOTIFY_COMPACT=$(config_get '.notifications.on_compaction')
@@ -97,13 +124,14 @@ NOTIFY_COMPACT=$(config_get '.notifications.on_compaction')
 nohup bash -c "
   echo \$\$ > '$LOCK_FILE'
   trap 'rm -f \"$LOCK_FILE\"' EXIT
-  '$DECANT_BIN' compact '$TRANSCRIPT_PATH' --last $KEEP_LAST --model '$MODEL' $([ \"$STRIP\" = true ] && echo --strip) 2>&1
+  echo 'Strategy: $BOUNDARY_DESC'
+  '$DECANT_BIN' compact '$TRANSCRIPT_PATH' $BOUNDARY_ARGS --model '$MODEL' $([ \"$STRIP\" = true ] && echo --strip) 2>&1
   EXIT_CODE=\$?
   if [[ \$EXIT_CODE -eq 0 ]] && [[ '$NOTIFY_ENABLED' == 'true' ]] && [[ '$NOTIFY_COMPACT' == 'true' ]]; then
     $(if [[ "$__PLATFORM" == "macos" ]]; then
-        echo "osascript -e 'display notification \"Session partially compacted (kept last $KEEP_LAST turns)\" with title \"Claude Auto-Compact\"' 2>/dev/null || true"
+        echo "osascript -e 'display notification \"Session partially compacted ($BOUNDARY_DESC)\" with title \"Claude Auto-Compact\"' 2>/dev/null || true"
       else
-        echo "notify-send 'Claude Auto-Compact' 'Session partially compacted (kept last $KEEP_LAST turns)' 2>/dev/null || true"
+        echo "notify-send 'Claude Auto-Compact' 'Session partially compacted ($BOUNDARY_DESC)' 2>/dev/null || true"
       fi)
   fi
 " > "$LOG_FILE" 2>&1 &

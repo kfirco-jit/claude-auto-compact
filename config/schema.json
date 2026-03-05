@@ -17,6 +17,7 @@
     "compaction": {
       "type": "object",
       "properties": {
+        "strategy": { "type": "string", "enum": ["auto", "last"] },
         "keep_last": { "type": "integer", "minimum": 1 },
         "strip_noise": { "type": "boolean" },
         "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },

@@ -80,6 +80,7 @@ Config file: `~/.claude/hooks/partial-compact/config.json`
     "compact_pct": 70
   },
   "compaction": {
+    "strategy": "auto",
     "keep_last": 10,
     "strip_noise": true,
     "model": "haiku",
@@ -106,7 +107,8 @@ Config file: `~/.claude/hooks/partial-compact/config.json`
 | `thresholds.warn_pct` | 70 | Show warning at this % |
 | `thresholds.urgent_pct` | 85 | Show urgent warning at this % |
 | `thresholds.compact_pct` | 70 | Trigger compaction on exit at this % |
-| `compaction.keep_last` | 10 | Number of recent user turns to preserve verbatim |
+| `compaction.strategy` | auto | Boundary selection: `auto` (haiku decides topic vs last), `last` (always keep last N) |
+| `compaction.keep_last` | 10 | Number of recent user turns to preserve verbatim (used as default/fallback) |
 | `compaction.strip_noise` | true | Remove progress indicators, thinking blocks, oversized tool output |
 | `compaction.model` | haiku | Model for summarization (haiku/sonnet/opus) |
 | `compaction.dry_run` | true | Simulate compaction without modifying files |

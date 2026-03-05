@@ -296,11 +296,44 @@ cmd_compact() {
     return 0
   fi
 
+  # Determine strategy
+  local strategy boundary_args boundary_desc
+  strategy=$(config_get '.compaction.strategy')
+  boundary_args="--last $keep_last"
+  boundary_desc="last $keep_last turns"
+
+  if [[ "$strategy" == "auto" ]]; then
+    local decant_python strategy_result strategy_mode
+    decant_python="$(dirname "$decant_bin")/../.venv/bin/python3"
+    local strategy_script="$INSTALL_DIR/hooks/lib/strategy.py"
+    if [[ -x "$decant_python" ]] && [[ -f "$strategy_script" ]]; then
+      echo "Analyzing session for optimal compaction boundary..."
+      strategy_result=$("$decant_python" "$strategy_script" "$session" "$keep_last" 2>/dev/null) || true
+      strategy_mode=$(echo "$strategy_result" | jq -r '.mode // empty' 2>/dev/null)
+      local smart_last
+      smart_last=$(echo "$strategy_result" | jq -r '.last // empty' 2>/dev/null)
+      # Update keep_last if haiku recommended a different value
+      if [[ -n "$smart_last" ]] && [[ "$smart_last" -gt 0 ]] 2>/dev/null; then
+        keep_last="$smart_last"
+        boundary_args="--last $keep_last"
+        boundary_desc="last $keep_last turns"
+      fi
+      if [[ "$strategy_mode" == "topic" ]]; then
+        local topic
+        topic=$(echo "$strategy_result" | jq -r '.topic // empty' 2>/dev/null)
+        if [[ -n "$topic" ]]; then
+          boundary_args="--topic '$topic'"
+          boundary_desc="topic: $topic (fallback: last $keep_last)"
+        fi
+      fi
+    fi
+  fi
+
   echo "Compacting: $(basename "$session")"
-  echo "  Keeping last $keep_last turns, model=$model, strip=$strip"
+  echo "  Strategy: $boundary_desc, model=$model, strip=$strip"
   echo ""
 
-  local cmd="$decant_bin compact $session --last $keep_last --model $model"
+  local cmd="$decant_bin compact $session $boundary_args --model $model"
   if [[ "$strip" == "true" ]]; then
     cmd="$cmd --strip"
   fi

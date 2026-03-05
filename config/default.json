@@ -7,6 +7,7 @@
     "compact_pct": 70
   },
   "compaction": {
+    "strategy": "auto",
     "keep_last": 10,
     "strip_noise": true,
     "model": "haiku",
