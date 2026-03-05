@@ -26,15 +26,20 @@ URGENT=$(config_threshold urgent)
 WARN=$(config_threshold warn)
 PCT=$((TOKENS * 100 / WINDOW))
 
+MSG=""
 if [[ "$TOKENS" -ge "$URGENT" ]] 2>/dev/null; then
-  echo "[auto-compact] Context at ${TOKENS} tokens (~${PCT}%). Auto-compact imminent — exit now for partial compaction." >&2
+  MSG="Context at ~${PCT}% (${TOKENS} tokens). Exit now for partial compaction."
   NOTIFY_ENABLED=$(config_get '.notifications.enabled')
   NOTIFY_WARN=$(config_get '.notifications.on_warning')
   if [[ "$NOTIFY_ENABLED" == "true" ]] && [[ "$NOTIFY_WARN" == "true" ]]; then
     platform_notify "Claude Auto-Compact" "Context at ${PCT}% — exit now for partial compaction"
   fi
 elif [[ "$TOKENS" -ge "$WARN" ]] 2>/dev/null; then
-  echo "[auto-compact] Context at ${TOKENS} tokens (~${PCT}%)." >&2
+  MSG="Context at ~${PCT}%"
+fi
+
+if [[ -n "$MSG" ]]; then
+  jq -n --arg msg "$MSG" '{"systemMessage": $msg}'
 fi
 
 exit 0
