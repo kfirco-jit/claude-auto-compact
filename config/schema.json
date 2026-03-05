@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "claude-auto-compact configuration",
+  "type": "object",
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "context_window_tokens": { "type": "integer", "minimum": 10000 },
+    "thresholds": {
+      "type": "object",
+      "properties": {
+        "warn_pct": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "urgent_pct": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "compact_pct": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "additionalProperties": false
+    },
+    "compaction": {
+      "type": "object",
+      "properties": {
+        "keep_last": { "type": "integer", "minimum": 1 },
+        "strip_noise": { "type": "boolean" },
+        "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
+        "dry_run": { "type": "boolean" },
+        "min_turns": { "type": "integer", "minimum": 1 },
+        "min_session_age_minutes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "notifications": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "on_warning": { "type": "boolean" },
+        "on_compaction": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "directory": { "type": "string" },
+        "max_files": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "decant_bin": { "type": "string" }
+  },
+  "additionalProperties": false
+}

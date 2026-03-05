@@ -1,0 +1,348 @@
+#!/bin/bash
+# auto-compact — CLI for claude-auto-compact
+# Usage: auto-compact <command> [options]
+
+VERSION="0.1.0"
+
+# Find install directory
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+source "$INSTALL_DIR/hooks/lib/platform.sh"
+source "$INSTALL_DIR/hooks/lib/config.sh"
+source "$INSTALL_DIR/hooks/lib/tokens.sh"
+
+# Find the most recent session JSONL for the current project
+find_latest_session() {
+  local project_dir
+  project_dir=$(echo "$PWD" | tr '/' '-')
+  local sessions_dir="$HOME/.claude/projects/${project_dir}"
+
+  if [[ ! -d "$sessions_dir" ]]; then
+    return 1
+  fi
+
+  ls -t "$sessions_dir"/*.jsonl 2>/dev/null | head -1
+}
+
+cmd_version() {
+  echo "auto-compact v${VERSION}"
+}
+
+cmd_health() {
+  local all_ok=true
+
+  echo "=== auto-compact health check ==="
+  echo ""
+
+  # jq
+  if command -v jq &>/dev/null; then
+    echo "  [OK] jq $(jq --version 2>&1)"
+  else
+    echo "  [FAIL] jq not found — install with: brew install jq (macOS) or apt install jq (Linux)"
+    all_ok=false
+  fi
+
+  # python3
+  if command -v python3 &>/dev/null; then
+    echo "  [OK] python3 $(python3 --version 2>&1 | cut -d' ' -f2)"
+  else
+    echo "  [FAIL] python3 not found"
+    all_ok=false
+  fi
+
+  # decant
+  __INSTALL_DIR="$INSTALL_DIR"
+  config_load "$PWD"
+  local decant_bin
+  decant_bin=$(config_decant_bin)
+  if [[ -x "$decant_bin" ]]; then
+    echo "  [OK] decant at $decant_bin"
+  else
+    echo "  [FAIL] decant not found at $decant_bin"
+    echo "         Install: git clone https://github.com/TKasperczyk/decant.git ~/.claude/tools/decant"
+    echo "         Then: cd ~/.claude/tools/decant && python3 -m venv .venv && .venv/bin/pip install -e ."
+    all_ok=false
+  fi
+
+  # config
+  local user_config="$HOME/.claude/hooks/partial-compact/config.json"
+  if [[ -f "$user_config" ]]; then
+    if jq empty "$user_config" 2>/dev/null; then
+      echo "  [OK] config at $user_config"
+    else
+      echo "  [FAIL] config at $user_config is invalid JSON"
+      all_ok=false
+    fi
+  else
+    echo "  [WARN] no user config at $user_config (using defaults)"
+  fi
+
+  # hooks in settings.json
+  local settings="$HOME/.claude/settings.json"
+  if [[ -f "$settings" ]]; then
+    if grep -q "partial-compact" "$settings" 2>/dev/null; then
+      echo "  [OK] hooks registered in $settings"
+    else
+      echo "  [FAIL] hooks not registered in $settings — run install.sh"
+      all_ok=false
+    fi
+  else
+    echo "  [FAIL] $settings not found"
+    all_ok=false
+  fi
+
+  # dry_run status
+  local dry_run
+  dry_run=$(config_get '.compaction.dry_run')
+  if [[ "$dry_run" == "true" ]]; then
+    echo ""
+    echo "  [NOTE] dry_run is ON — compaction is simulated, not executed."
+    echo "         To enable: set \"dry_run\": false in $user_config"
+  fi
+
+  echo ""
+  if $all_ok; then
+    echo "All checks passed."
+  else
+    echo "Some checks failed. See above."
+    return 1
+  fi
+}
+
+cmd_config() {
+  local project_path="$PWD"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) project_path="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  __INSTALL_DIR="$INSTALL_DIR"
+  config_load "$project_path"
+  echo "$__CONFIG" | jq .
+}
+
+cmd_status() {
+  __INSTALL_DIR="$INSTALL_DIR"
+  config_load "$PWD"
+
+  local session
+  session=$(find_latest_session)
+  if [[ -z "$session" ]]; then
+    echo "No sessions found for current project."
+    return 1
+  fi
+
+  local session_id
+  session_id=$(basename "$session" .jsonl)
+
+  echo "=== Session Status ==="
+  echo ""
+  echo "  Session:  ${session_id:0:8}..."
+  echo "  File:     $session"
+  echo "  Size:     $(du -h "$session" 2>/dev/null | cut -f1 | tr -d ' ')"
+
+  local tokens
+  tokens=$(tokens_get_latest "$session")
+  local window
+  window=$(config_get '.context_window_tokens')
+  local pct=$((tokens * 100 / window))
+  echo "  Tokens:   $tokens / $window (~${pct}%)"
+
+  local turns
+  turns=$(tokens_count_user_turns "$session")
+  echo "  Turns:    $turns user messages"
+
+  local age
+  age=$(tokens_session_age_minutes "$session")
+  echo "  Age:      ${age} minutes"
+
+  if tokens_has_summary_record "$session"; then
+    echo "  Compact:  Already compacted by decant"
+  else
+    echo "  Compact:  Not yet compacted"
+  fi
+
+  # Thresholds
+  local warn_t compact_t urgent_t
+  warn_t=$(config_threshold warn)
+  compact_t=$(config_threshold compact)
+  urgent_t=$(config_threshold urgent)
+
+  echo ""
+  if [[ "$tokens" -ge "$urgent_t" ]]; then
+    echo "  Status:   CRITICAL — auto-compact imminent"
+  elif [[ "$tokens" -ge "$warn_t" ]]; then
+    echo "  Status:   WARNING — approaching compaction threshold"
+  else
+    echo "  Status:   OK — below thresholds"
+  fi
+
+  # Last compaction log
+  local log_dir
+  log_dir=$(config_log_dir)
+  local latest_log
+  latest_log=$(ls -t "$log_dir"/*.log 2>/dev/null | head -1)
+  if [[ -n "$latest_log" ]]; then
+    echo ""
+    echo "  Last log: $latest_log"
+    echo "            $(head -1 "$latest_log" 2>/dev/null)"
+  fi
+}
+
+cmd_logs() {
+  __INSTALL_DIR="$INSTALL_DIR"
+  config_load "$PWD"
+
+  local log_dir tail_n=""
+  log_dir=$(config_log_dir)
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tail) tail_n="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if [[ ! -d "$log_dir" ]] || [[ -z "$(ls "$log_dir"/*.log 2>/dev/null)" ]]; then
+    echo "No compaction logs found in $log_dir"
+    return 0
+  fi
+
+  if [[ -n "$tail_n" ]]; then
+    local latest
+    latest=$(ls -t "$log_dir"/*.log 2>/dev/null | head -1)
+    echo "=== $latest ==="
+    tail -n "$tail_n" "$latest"
+  else
+    echo "=== Compaction Logs ==="
+    echo ""
+    for log in $(ls -t "$log_dir"/*.log 2>/dev/null | head -10); do
+      local ts
+      ts=$(basename "$log" .log | sed 's/compact-//')
+      local size
+      size=$(du -h "$log" 2>/dev/null | cut -f1 | tr -d ' ')
+      echo "  $ts  ($size)  $log"
+    done
+  fi
+}
+
+cmd_compact() {
+  __INSTALL_DIR="$INSTALL_DIR"
+  config_load "$PWD"
+
+  local session="" force=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=true; shift ;;
+      *) session="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$session" ]]; then
+    session=$(find_latest_session)
+    if [[ -z "$session" ]]; then
+      echo "No sessions found for current project."
+      return 1
+    fi
+  fi
+
+  if [[ ! -f "$session" ]]; then
+    echo "Session file not found: $session"
+    return 1
+  fi
+
+  local decant_bin
+  decant_bin=$(config_decant_bin)
+  if [[ ! -x "$decant_bin" ]]; then
+    echo "Decant not found at $decant_bin — run: auto-compact health"
+    return 1
+  fi
+
+  # Guards (skip min_age since user is explicitly requesting)
+  if tokens_has_summary_record "$session" && ! $force; then
+    echo "Session already compacted. Use --force to re-compact."
+    return 0
+  fi
+
+  local user_turns
+  user_turns=$(tokens_count_user_turns "$session")
+  local min_turns
+  min_turns=$(config_get '.compaction.min_turns')
+  if [[ "$user_turns" -lt "$min_turns" ]] && ! $force; then
+    echo "Only $user_turns user turns (minimum: $min_turns). Use --force to compact anyway."
+    return 0
+  fi
+
+  local keep_last
+  keep_last=$(config_get '.compaction.keep_last')
+  if [[ "$keep_last" -ge "$user_turns" ]]; then
+    keep_last=$((user_turns > 1 ? user_turns - 1 : 1))
+  fi
+
+  local model strip
+  model=$(config_get '.compaction.model')
+  strip=$(config_get '.compaction.strip_noise')
+
+  local dry_run
+  dry_run=$(config_get '.compaction.dry_run')
+  if [[ "$dry_run" == "true" ]] && ! $force; then
+    echo "Dry run mode is ON. Use --force to compact anyway."
+    echo "Or set \"dry_run\": false in ~/.claude/hooks/partial-compact/config.json"
+    return 0
+  fi
+
+  echo "Compacting: $(basename "$session")"
+  echo "  Keeping last $keep_last turns, model=$model, strip=$strip"
+  echo ""
+
+  local cmd="$decant_bin compact $session --last $keep_last --model $model"
+  if [[ "$strip" == "true" ]]; then
+    cmd="$cmd --strip"
+  fi
+
+  eval "$cmd"
+}
+
+cmd_help() {
+  cat <<EOF
+auto-compact v${VERSION} — Automatic partial compaction for Claude Code
+
+Usage: auto-compact <command> [options]
+
+Commands:
+  status              Show current session context usage
+  health              Validate installation and prerequisites
+  config [--project]  Print merged configuration
+  logs [--tail N]     Show recent compaction logs
+  compact [SESSION]   Manually trigger partial compaction
+  version             Print version
+  help                Show this help
+
+Options:
+  compact --force     Skip guards (dry_run, already-compacted, min-turns)
+  config --project P  Use project path P for override resolution
+  logs --tail N       Show last N lines of most recent log
+
+Configuration:
+  Default:  $(cd "$INSTALL_DIR" && pwd)/config/default.json
+  User:     ~/.claude/hooks/partial-compact/config.json
+  Project:  .claude/partial-compact.json (in project root)
+EOF
+}
+
+# Dispatch
+case "${1:-help}" in
+  version) cmd_version ;;
+  health)  cmd_health ;;
+  config)  shift; cmd_config "$@" ;;
+  status)  cmd_status ;;
+  logs)    shift; cmd_logs "$@" ;;
+  compact) shift; cmd_compact "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *) echo "Unknown command: $1"; echo "Run: auto-compact help"; exit 1 ;;
+esac

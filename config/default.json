@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "context_window_tokens": 200000,
+  "thresholds": {
+    "warn_pct": 70,
+    "urgent_pct": 85,
+    "compact_pct": 70
+  },
+  "compaction": {
+    "keep_last": 10,
+    "strip_noise": true,
+    "model": "haiku",
+    "dry_run": true,
+    "min_turns": 3,
+    "min_session_age_minutes": 5
+  },
+  "notifications": {
+    "enabled": true,
+    "on_warning": false,
+    "on_compaction": true
+  },
+  "logging": {
+    "directory": "~/.claude/hooks/partial-compact/logs",
+    "max_files": 20
+  },
+  "decant_bin": "~/.claude/tools/decant/.venv/bin/decant"
+}
