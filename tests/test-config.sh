@@ -22,6 +22,9 @@ assert_eq() {
 echo "=== config.sh tests ==="
 
 # Load default config (no user/project overrides)
+# Override HOME to isolate from installed user config
+_ORIG_HOME="$HOME"
+HOME=$(mktemp -d)
 __INSTALL_DIR="$SCRIPT_DIR/.."
 config_load ""
 
@@ -74,6 +77,7 @@ assert_eq "override model" "sonnet" "$(config_get '.compaction.model')"
 assert_eq "non-overridden strip_noise" "true" "$(config_get '.compaction.strip_noise')"
 assert_eq "non-overridden warn_pct" "70" "$(config_get '.thresholds.warn_pct')"
 rm -rf "$TMPDIR_PROJ"
+HOME="$_ORIG_HOME"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -80,3 +80,41 @@ config_log_dir() {
   dir=$(config_get ".logging.directory")
   echo "${dir/#\~/$HOME}"
 }
+
+# Validate config values. Returns warnings on stderr, returns 0 if valid, 1 if critical errors.
+config_validate() {
+  local errors=0
+  local warn_pct compact_pct urgent_pct keep_last min_turns
+
+  warn_pct=$(config_get '.thresholds.warn_pct')
+  compact_pct=$(config_get '.thresholds.compact_pct')
+  urgent_pct=$(config_get '.thresholds.urgent_pct')
+  keep_last=$(config_get '.compaction.keep_last')
+  min_turns=$(config_get '.compaction.min_turns')
+
+  if [[ "$warn_pct" -gt "$urgent_pct" ]] 2>/dev/null; then
+    echo "[auto-compact] config: warn_pct ($warn_pct) > urgent_pct ($urgent_pct)" >&2
+    errors=1
+  fi
+  if [[ "$compact_pct" -gt "$urgent_pct" ]] 2>/dev/null; then
+    echo "[auto-compact] config: compact_pct ($compact_pct) > urgent_pct ($urgent_pct)" >&2
+    errors=1
+  fi
+  if [[ "$keep_last" -lt 1 ]] 2>/dev/null; then
+    echo "[auto-compact] config: keep_last must be >= 1" >&2
+    errors=1
+  fi
+  if [[ "$min_turns" -lt 1 ]] 2>/dev/null; then
+    echo "[auto-compact] config: min_turns must be >= 1" >&2
+    errors=1
+  fi
+
+  local strategy
+  strategy=$(config_get '.compaction.strategy')
+  if [[ "$strategy" != "auto" ]] && [[ "$strategy" != "last" ]]; then
+    echo "[auto-compact] config: strategy must be 'auto' or 'last', got '$strategy'" >&2
+    errors=1
+  fi
+
+  return $errors
+}

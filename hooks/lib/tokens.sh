@@ -31,6 +31,26 @@ tokens_has_summary_record() {
   head -10 "$path" 2>/dev/null | grep -q '"type":"summary"'
 }
 
+# Count user turns added AFTER the last compaction (post-summary turns).
+# If never compacted, returns total user turns.
+tokens_count_post_summary_turns() {
+  local path="$1"
+  if ! tokens_has_summary_record "$path"; then
+    tokens_count_user_turns "$path"
+    return
+  fi
+  # Find the line number of the last summary record, count user turns after it
+  local summary_line
+  summary_line=$(grep -n '"type":"summary"' "$path" 2>/dev/null | tail -1 | cut -d: -f1)
+  if [[ -z "$summary_line" ]]; then
+    tokens_count_user_turns "$path"
+    return
+  fi
+  local count
+  count=$(tail -n +"$((summary_line + 1))" "$path" 2>/dev/null | grep -c '"type":"user"') || true
+  echo "${count:-0}"
+}
+
 tokens_session_age_minutes() {
   local path="$1"
   local ts
@@ -51,6 +71,20 @@ age = (datetime.now(timezone.utc) - dt).total_seconds() / 60
 print(int(age))
 " 2>/dev/null) || echo "0"
   echo "$ts"
+}
+
+# Extract compaction summary text length (0 if not compacted)
+tokens_summary_length() {
+  local path="$1"
+  head -10 "$path" 2>/dev/null | grep '"type":"summary"' | head -1 | python3 -c "
+import sys, json
+line = sys.stdin.readline()
+if not line.strip():
+    print(0)
+    sys.exit(0)
+obj = json.loads(line)
+print(len(obj.get('summary', '')))
+" 2>/dev/null || echo "0"
 }
 
 tokens_resolve_transcript() {

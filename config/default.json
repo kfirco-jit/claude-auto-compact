@@ -13,7 +13,9 @@
     "model": "haiku",
     "dry_run": true,
     "min_turns": 3,
-    "min_session_age_minutes": 5
+    "min_session_age_minutes": 5,
+    "target_pct": 50,
+    "max_rounds": 3
   },
   "notifications": {
     "enabled": true,

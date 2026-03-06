@@ -92,6 +92,18 @@ cmd_health() {
     all_ok=false
   fi
 
+  # config validation
+  local validation_output
+  validation_output=$(config_validate 2>&1)
+  if [[ $? -ne 0 ]]; then
+    echo "$validation_output" | while read -r line; do
+      echo "  [WARN] $line"
+    done
+    all_ok=false
+  else
+    echo "  [OK] config values valid"
+  fi
+
   # dry_run status
   local dry_run
   dry_run=$(config_get '.compaction.dry_run')

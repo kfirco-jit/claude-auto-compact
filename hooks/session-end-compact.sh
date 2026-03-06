@@ -18,6 +18,7 @@ fi
 
 CWD=$(echo "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 config_load "$CWD"
+config_validate 2>/dev/null || exit 0
 
 # Check decant is installed
 DECANT_BIN=$(config_decant_bin)
@@ -27,14 +28,13 @@ fi
 
 TRANSCRIPT_PATH=$(tokens_resolve_transcript "$HOOK_INPUT") || exit 0
 
-# Guard: already compacted by decant
-if tokens_has_summary_record "$TRANSCRIPT_PATH"; then
-  exit 0
-fi
-
-# Guard: too few turns
+# Guard: too few turns (use post-summary turns if already compacted)
 MIN_TURNS=$(config_get '.compaction.min_turns')
-USER_TURNS=$(tokens_count_user_turns "$TRANSCRIPT_PATH")
+if tokens_has_summary_record "$TRANSCRIPT_PATH"; then
+  USER_TURNS=$(tokens_count_post_summary_turns "$TRANSCRIPT_PATH")
+else
+  USER_TURNS=$(tokens_count_user_turns "$TRANSCRIPT_PATH")
+fi
 if [[ "$USER_TURNS" -lt "$MIN_TURNS" ]] 2>/dev/null; then
   exit 0
 fi
@@ -120,20 +120,31 @@ fi
 
 NOTIFY_ENABLED=$(config_get '.notifications.enabled')
 NOTIFY_COMPACT=$(config_get '.notifications.on_compaction')
+TARGET_PCT=$(config_get '.compaction.target_pct')
+MAX_ROUNDS=$(config_get '.compaction.max_rounds')
+BEFORE_SIZE=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ')
 
-nohup bash -c "
-  echo \$\$ > '$LOCK_FILE'
-  trap 'rm -f \"$LOCK_FILE\"' EXIT
-  echo 'Strategy: $BOUNDARY_DESC'
-  '$DECANT_BIN' compact '$TRANSCRIPT_PATH' $BOUNDARY_ARGS --model '$MODEL' $([ \"$STRIP\" = true ] && echo --strip) 2>&1
-  EXIT_CODE=\$?
-  if [[ \$EXIT_CODE -eq 0 ]] && [[ '$NOTIFY_ENABLED' == 'true' ]] && [[ '$NOTIFY_COMPACT' == 'true' ]]; then
-    $(if [[ "$__PLATFORM" == "macos" ]]; then
-        echo "osascript -e 'display notification \"Session partially compacted ($BOUNDARY_DESC)\" with title \"Claude Auto-Compact\"' 2>/dev/null || true"
-      else
-        echo "notify-send 'Claude Auto-Compact' 'Session partially compacted ($BOUNDARY_DESC)' 2>/dev/null || true"
-      fi)
-  fi
-" > "$LOG_FILE" 2>&1 &
+RUNNER="$SCRIPT_DIR/lib/compact-runner.sh"
+
+nohup env \
+  DECANT_BIN="$DECANT_BIN" \
+  TRANSCRIPT_PATH="$TRANSCRIPT_PATH" \
+  BOUNDARY_ARGS="$BOUNDARY_ARGS" \
+  MODEL="$MODEL" \
+  STRIP="$STRIP" \
+  KEEP_LAST="$KEEP_LAST" \
+  BEFORE_SIZE="$BEFORE_SIZE" \
+  TARGET_PCT="${TARGET_PCT:-50}" \
+  MAX_ROUNDS="${MAX_ROUNDS:-3}" \
+  PLATFORM="$__PLATFORM" \
+  NOTIFY_ENABLED="$NOTIFY_ENABLED" \
+  NOTIFY_COMPACT="$NOTIFY_COMPACT" \
+  BOUNDARY_DESC="$BOUNDARY_DESC" \
+  LOCK_FILE="$LOCK_FILE" \
+  bash -c "
+    echo \$\$ > '$LOCK_FILE'
+    trap 'rm -f \"$LOCK_FILE\"' EXIT
+    bash '$RUNNER'
+  " > "$LOG_FILE" 2>&1 &
 
 exit 0

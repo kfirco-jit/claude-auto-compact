@@ -86,7 +86,9 @@ Config file: `~/.claude/hooks/partial-compact/config.json`
     "model": "haiku",
     "dry_run": false,
     "min_turns": 3,
-    "min_session_age_minutes": 5
+    "min_session_age_minutes": 5,
+    "target_pct": 50,
+    "max_rounds": 3
   },
   "notifications": {
     "enabled": true,
@@ -114,6 +116,8 @@ Config file: `~/.claude/hooks/partial-compact/config.json`
 | `compaction.dry_run` | true | Simulate compaction without modifying files |
 | `compaction.min_turns` | 3 | Don't compact sessions with fewer user turns |
 | `compaction.min_session_age_minutes` | 5 | Don't compact brand-new sessions |
+| `compaction.target_pct` | 50 | Target file size as % of original. Iterative compaction stops when reached |
+| `compaction.max_rounds` | 3 | Maximum compaction rounds per session (iterative budget targeting) |
 | `notifications.on_compaction` | true | macOS/Linux notification when compaction completes |
 
 ### Per-Project Overrides
