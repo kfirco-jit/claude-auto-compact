@@ -2,7 +2,7 @@
 # auto-compact — CLI for claude-auto-compact
 # Usage: auto-compact <command> [options]
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Find install directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,6 +11,7 @@ INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$INSTALL_DIR/hooks/lib/platform.sh"
 source "$INSTALL_DIR/hooks/lib/config.sh"
 source "$INSTALL_DIR/hooks/lib/tokens.sh"
+source "$INSTALL_DIR/hooks/lib/strategy-resolve.sh"
 
 # Find the most recent session JSONL for the current project
 find_latest_session() {
@@ -52,8 +53,7 @@ cmd_health() {
   fi
 
   # decant
-  __INSTALL_DIR="$INSTALL_DIR"
-  config_load "$PWD"
+  config_load "$PWD" "$INSTALL_DIR"
   local decant_bin
   decant_bin=$(config_decant_bin)
   if [[ -x "$decant_bin" ]]; then
@@ -96,7 +96,7 @@ cmd_health() {
   local validation_output
   validation_output=$(config_validate 2>&1)
   if [[ $? -ne 0 ]]; then
-    echo "$validation_output" | while read -r line; do
+    echo "$validation_output" | while IFS= read -r line; do
       echo "  [WARN] $line"
     done
     all_ok=false
@@ -132,14 +132,12 @@ cmd_config() {
     esac
   done
 
-  __INSTALL_DIR="$INSTALL_DIR"
-  config_load "$project_path"
+  config_load "$project_path" "$INSTALL_DIR"
   echo "$__CONFIG" | jq .
 }
 
 cmd_status() {
-  __INSTALL_DIR="$INSTALL_DIR"
-  config_load "$PWD"
+  config_load "$PWD" "$INSTALL_DIR"
 
   local session
   session=$(find_latest_session)
@@ -206,8 +204,7 @@ cmd_status() {
 }
 
 cmd_logs() {
-  __INSTALL_DIR="$INSTALL_DIR"
-  config_load "$PWD"
+  config_load "$PWD" "$INSTALL_DIR"
 
   local log_dir tail_n=""
   log_dir=$(config_log_dir)
@@ -232,19 +229,58 @@ cmd_logs() {
   else
     echo "=== Compaction Logs ==="
     echo ""
-    for log in $(ls -t "$log_dir"/*.log 2>/dev/null | head -10); do
-      local ts
+    while IFS= read -r log; do
+      local ts size
       ts=$(basename "$log" .log | sed 's/compact-//')
-      local size
       size=$(du -h "$log" 2>/dev/null | cut -f1 | tr -d ' ')
       echo "  $ts  ($size)  $log"
-    done
+    done < <(ls -t "$log_dir"/*.log 2>/dev/null | head -10)
   fi
 }
 
+cmd_history() {
+  config_load "$PWD" "$INSTALL_DIR"
+
+  local log_dir count=20
+  log_dir=$(config_log_dir)
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --count|-n) count="$2"; shift 2 ;;
+      --json) JSON_OUT=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local history_file="$log_dir/history.jsonl"
+  if [[ ! -f "$history_file" ]]; then
+    echo "No compaction history found."
+    return 0
+  fi
+
+  if [[ "${JSON_OUT:-}" == "true" ]]; then
+    tail -n "$count" "$history_file"
+    return
+  fi
+
+  echo "=== Compaction History ==="
+  echo ""
+  printf "  %-20s %-12s %-10s %-10s %s\n" "TIMESTAMP" "SESSION" "BEFORE" "AFTER" "STRATEGY"
+  printf "  %-20s %-12s %-10s %-10s %s\n" "---------" "-------" "------" "-----" "--------"
+  tail -n "$count" "$history_file" | while IFS= read -r line; do
+    local ts sid before after desc
+    ts=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null)
+    sid=$(echo "$line" | jq -r '.session_id // ""' 2>/dev/null)
+    before=$(echo "$line" | jq -r '.before_bytes // 0' 2>/dev/null)
+    after=$(echo "$line" | jq -r '.after_bytes // 0' 2>/dev/null)
+    desc=$(echo "$line" | jq -r '.strategy.description // ""' 2>/dev/null)
+    printf "  %-20s %-12s %-10s %-10s %s\n" \
+      "${ts:0:19}" "${sid:0:8}.." "${before}" "${after}" "${desc:0:40}"
+  done
+}
+
 cmd_compact() {
-  __INSTALL_DIR="$INSTALL_DIR"
-  config_load "$PWD"
+  config_load "$PWD" "$INSTALL_DIR"
 
   local session="" force=false
 
@@ -268,10 +304,9 @@ cmd_compact() {
     return 1
   fi
 
-  local decant_bin
-  decant_bin=$(config_decant_bin)
-  if [[ ! -x "$decant_bin" ]]; then
-    echo "Decant not found at $decant_bin — run: auto-compact health"
+  DECANT_BIN=$(config_decant_bin)
+  if [[ ! -x "$DECANT_BIN" ]]; then
+    echo "Decant not found at $DECANT_BIN — run: auto-compact health"
     return 1
   fi
 
@@ -290,10 +325,9 @@ cmd_compact() {
     return 0
   fi
 
-  local keep_last
-  keep_last=$(config_get '.compaction.keep_last')
-  if [[ "$keep_last" -ge "$user_turns" ]]; then
-    keep_last=$((user_turns > 1 ? user_turns - 1 : 1))
+  KEEP_LAST=$(config_get '.compaction.keep_last')
+  if [[ "$KEEP_LAST" -ge "$user_turns" ]]; then
+    KEEP_LAST=$((user_turns > 1 ? user_turns - 1 : 1))
   fi
 
   local model strip
@@ -308,49 +342,30 @@ cmd_compact() {
     return 0
   fi
 
-  # Determine strategy
-  local strategy boundary_args boundary_desc
-  strategy=$(config_get '.compaction.strategy')
-  boundary_args="--last $keep_last"
-  boundary_desc="last $keep_last turns"
-
-  if [[ "$strategy" == "auto" ]]; then
-    local decant_python strategy_result strategy_mode
-    decant_python="$(dirname "$decant_bin")/../.venv/bin/python3"
-    local strategy_script="$INSTALL_DIR/hooks/lib/strategy.py"
-    if [[ -x "$decant_python" ]] && [[ -f "$strategy_script" ]]; then
-      echo "Analyzing session for optimal compaction boundary..."
-      strategy_result=$("$decant_python" "$strategy_script" "$session" "$keep_last" 2>/dev/null) || true
-      strategy_mode=$(echo "$strategy_result" | jq -r '.mode // empty' 2>/dev/null)
-      local smart_last
-      smart_last=$(echo "$strategy_result" | jq -r '.last // empty' 2>/dev/null)
-      # Update keep_last if haiku recommended a different value
-      if [[ -n "$smart_last" ]] && [[ "$smart_last" -gt 0 ]] 2>/dev/null; then
-        keep_last="$smart_last"
-        boundary_args="--last $keep_last"
-        boundary_desc="last $keep_last turns"
-      fi
-      if [[ "$strategy_mode" == "topic" ]]; then
-        local topic
-        topic=$(echo "$strategy_result" | jq -r '.topic // empty' 2>/dev/null)
-        if [[ -n "$topic" ]]; then
-          boundary_args="--topic '$topic'"
-          boundary_desc="topic: $topic (fallback: last $keep_last)"
-        fi
-      fi
-    fi
+  # Determine strategy via shared function
+  STRATEGY=$(config_get '.compaction.strategy')
+  if [[ "$STRATEGY" == "auto" ]]; then
+    echo "Analyzing session for optimal compaction boundary..."
   fi
+  strategy_resolve "$session" "$INSTALL_DIR"
 
   echo "Compacting: $(basename "$session")"
-  echo "  Strategy: $boundary_desc, model=$model, strip=$strip"
+  echo "  Strategy: $BOUNDARY_DESC, model=$model, strip=$strip"
   echo ""
 
-  local cmd="$decant_bin compact $session $boundary_args --model $model"
+  # Build command as array (no eval)
+  local cmd=("$DECANT_BIN" compact "$session")
+  if [[ "$BOUNDARY_MODE" == "topic" ]]; then
+    cmd+=(--topic "$BOUNDARY_TOPIC")
+  else
+    cmd+=(--last "$BOUNDARY_LAST")
+  fi
+  cmd+=(--model "$model")
   if [[ "$strip" == "true" ]]; then
-    cmd="$cmd --strip"
+    cmd+=(--strip)
   fi
 
-  eval "$cmd"
+  "${cmd[@]}"
 }
 
 cmd_help() {
@@ -364,6 +379,7 @@ Commands:
   health              Validate installation and prerequisites
   config [--project]  Print merged configuration
   logs [--tail N]     Show recent compaction logs
+  history [-n N]      Show compaction history
   compact [SESSION]   Manually trigger partial compaction
   version             Print version
   help                Show this help
@@ -372,6 +388,8 @@ Options:
   compact --force     Skip guards (dry_run, already-compacted, min-turns)
   config --project P  Use project path P for override resolution
   logs --tail N       Show last N lines of most recent log
+  history -n N        Show last N history entries (default: 20)
+  history --json      Output raw JSONL
 
 Configuration:
   Default:  $(cd "$INSTALL_DIR" && pwd)/config/default.json
@@ -387,6 +405,7 @@ case "${1:-help}" in
   config)  shift; cmd_config "$@" ;;
   status)  cmd_status ;;
   logs)    shift; cmd_logs "$@" ;;
+  history) shift; cmd_history "$@" ;;
   compact) shift; cmd_compact "$@" ;;
   help|--help|-h) cmd_help ;;
   *) echo "Unknown command: $1"; echo "Run: auto-compact help"; exit 1 ;;

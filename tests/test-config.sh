@@ -12,10 +12,10 @@ assert_eq() {
   local desc="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
     echo "  PASS: $desc"
-    ((PASS++))
+    PASS=$((PASS + 1))
   else
     echo "  FAIL: $desc (expected '$expected', got '$actual')"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
   fi
 }
 
@@ -24,7 +24,10 @@ echo "=== config.sh tests ==="
 # Load default config (no user/project overrides)
 # Override HOME to isolate from installed user config
 _ORIG_HOME="$HOME"
-HOME=$(mktemp -d)
+_TEST_HOME=$(mktemp -d)
+HOME="$_TEST_HOME"
+trap 'HOME="$_ORIG_HOME"; rm -rf "$_TEST_HOME"' EXIT
+
 __INSTALL_DIR="$SCRIPT_DIR/.."
 config_load ""
 
@@ -51,20 +54,20 @@ assert_eq "compact threshold" "140000" "$(config_threshold compact)"
 BIN=$(config_decant_bin)
 if [[ "$BIN" == *"/.claude/tools/decant/.venv/bin/decant" ]]; then
   echo "  PASS: decant_bin expanded correctly"
-  ((PASS++))
+  PASS=$((PASS + 1))
 else
   echo "  FAIL: decant_bin expansion ('$BIN')"
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
 fi
 
 # Test config_log_dir
 DIR=$(config_log_dir)
 if [[ "$DIR" == *"/.claude/hooks/partial-compact/logs" ]]; then
   echo "  PASS: log_dir expanded correctly"
-  ((PASS++))
+  PASS=$((PASS + 1))
 else
   echo "  FAIL: log_dir expansion ('$DIR')"
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
 fi
 
 # Test project override merge
@@ -77,7 +80,59 @@ assert_eq "override model" "sonnet" "$(config_get '.compaction.model')"
 assert_eq "non-overridden strip_noise" "true" "$(config_get '.compaction.strip_noise')"
 assert_eq "non-overridden warn_pct" "70" "$(config_get '.thresholds.warn_pct')"
 rm -rf "$TMPDIR_PROJ"
-HOME="$_ORIG_HOME"
+
+# Test config_validate — valid config (defaults are valid)
+config_load ""
+VALIDATION=$(config_validate 2>&1)
+VALID_EXIT=$?
+assert_eq "valid config returns 0" "0" "$VALID_EXIT"
+
+# Test config_validate — warn_pct > urgent_pct
+__CONFIG=$(echo "$__CONFIG" | jq '.thresholds.warn_pct = 90 | .thresholds.urgent_pct = 80')
+VALIDATION=$(config_validate 2>&1)
+if [[ $? -ne 0 ]] && echo "$VALIDATION" | grep -q "warn_pct"; then
+  echo "  PASS: validates warn_pct > urgent_pct"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: should reject warn_pct > urgent_pct"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test config_validate — invalid strategy
+config_load ""
+__CONFIG=$(echo "$__CONFIG" | jq '.compaction.strategy = "invalid"')
+VALIDATION=$(config_validate 2>&1)
+if [[ $? -ne 0 ]] && echo "$VALIDATION" | grep -q "strategy"; then
+  echo "  PASS: validates invalid strategy"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: should reject invalid strategy"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test config_validate — target_pct out of range
+config_load ""
+__CONFIG=$(echo "$__CONFIG" | jq '.compaction.target_pct = 5')
+VALIDATION=$(config_validate 2>&1)
+if [[ $? -ne 0 ]] && echo "$VALIDATION" | grep -q "target_pct"; then
+  echo "  PASS: validates target_pct < 10"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: should reject target_pct < 10"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test config_validate — max_rounds out of range
+config_load ""
+__CONFIG=$(echo "$__CONFIG" | jq '.compaction.max_rounds = 10')
+VALIDATION=$(config_validate 2>&1)
+if [[ $? -ne 0 ]] && echo "$VALIDATION" | grep -q "max_rounds"; then
+  echo "  PASS: validates max_rounds > 5"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: should reject max_rounds > 5"
+  FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

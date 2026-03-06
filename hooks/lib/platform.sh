@@ -25,7 +25,11 @@ platform_notify() {
   local message="$2"
 
   if [[ "$__PLATFORM" == "macos" ]]; then
-    osascript -e "display notification \"$message\" with title \"$title\"" 2>/dev/null || true
+    osascript \
+      -e "on run {t, m}" \
+      -e "display notification m with title t" \
+      -e "end run" \
+      -- "$title" "$message" 2>/dev/null || true
   elif command -v notify-send &>/dev/null; then
     notify-send "$title" "$message" 2>/dev/null || true
   fi

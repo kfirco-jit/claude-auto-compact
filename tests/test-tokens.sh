@@ -14,10 +14,10 @@ assert_eq() {
   local desc="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
     echo "  PASS: $desc"
-    ((PASS++))
+    PASS=$((PASS + 1))
   else
     echo "  FAIL: $desc (expected '$expected', got '$actual')"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
   fi
 }
 
@@ -34,33 +34,54 @@ assert_eq "count_user_turns" "3" "$TURNS"
 # tokens_has_summary_record — fixture has no summary
 if tokens_has_summary_record "$FIXTURE"; then
   echo "  FAIL: should not detect summary in normal fixture"
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
 else
   echo "  PASS: no summary in normal fixture"
-  ((PASS++))
+  PASS=$((PASS + 1))
 fi
 
-# Test with a compacted fixture
+# Test with a compacted fixture (summary + subsequent turns)
 COMPACT_FIXTURE=$(mktemp)
-echo '{"type":"summary","summary":"This is a test summary","leafUuid":"test"}' > "$COMPACT_FIXTURE"
-cat "$FIXTURE" >> "$COMPACT_FIXTURE"
+echo '{"type":"summary","summary":"This is a test summary of previous work","leafUuid":"test"}' > "$COMPACT_FIXTURE"
+echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first post-summary turn"}]}}' >> "$COMPACT_FIXTURE"
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"response"}]}}' >> "$COMPACT_FIXTURE"
+echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second post-summary turn"}]}}' >> "$COMPACT_FIXTURE"
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"response"}]}}' >> "$COMPACT_FIXTURE"
+
 if tokens_has_summary_record "$COMPACT_FIXTURE"; then
   echo "  PASS: detects summary in compacted fixture"
-  ((PASS++))
+  PASS=$((PASS + 1))
 else
   echo "  FAIL: should detect summary in compacted fixture"
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
 fi
+
+# tokens_count_post_summary_turns — should count only turns after summary
+POST_TURNS=$(tokens_count_post_summary_turns "$COMPACT_FIXTURE")
+assert_eq "count_post_summary_turns" "2" "$POST_TURNS"
+
+# tokens_count_post_summary_turns — on non-compacted file returns total
+POST_TURNS_NORMAL=$(tokens_count_post_summary_turns "$FIXTURE")
+assert_eq "count_post_summary_turns on normal file" "3" "$POST_TURNS_NORMAL"
+
+# tokens_summary_length — should return length of summary text
+SUMMARY_LEN=$(tokens_summary_length "$COMPACT_FIXTURE")
+assert_eq "summary_length" "39" "$SUMMARY_LEN"
+
+# tokens_summary_length — on non-compacted file returns 0
+SUMMARY_LEN_NORMAL=$(tokens_summary_length "$FIXTURE")
+assert_eq "summary_length on normal file" "0" "$SUMMARY_LEN_NORMAL"
+
 rm -f "$COMPACT_FIXTURE"
 
 # tokens_session_age_minutes
 AGE=$(tokens_session_age_minutes "$FIXTURE")
 if [[ "$AGE" =~ ^[0-9]+$ ]] && [[ "$AGE" -gt 0 ]]; then
   echo "  PASS: session_age_minutes is positive integer ($AGE)"
-  ((PASS++))
+  PASS=$((PASS + 1))
 else
   echo "  FAIL: session_age_minutes not positive integer ('$AGE')"
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
 fi
 
 # tokens_resolve_transcript — with valid transcript_path

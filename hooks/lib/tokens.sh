@@ -3,20 +3,16 @@
 
 tokens_get_latest() {
   local path="$1"
-  tail -100 "$path" 2>/dev/null \
-    | grep '"input_tokens"' \
-    | tail -1 \
-    | python3 -c "
-import sys, json
-line = sys.stdin.readline()
-if not line.strip():
-    print(0)
-    sys.exit(0)
-obj = json.loads(line)
-u = obj.get('message', {}).get('usage', {})
-total = u.get('input_tokens', 0) + u.get('cache_creation_input_tokens', 0) + u.get('cache_read_input_tokens', 0)
-print(total)
-" 2>/dev/null || echo "0"
+  local line
+  line=$(tail -100 "$path" 2>/dev/null | grep '"input_tokens"' | tail -1)
+  if [[ -z "$line" ]]; then
+    echo "0"
+    return
+  fi
+  echo "$line" | jq '
+    .message.usage |
+    (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)
+  ' 2>/dev/null || echo "0"
 }
 
 tokens_count_user_turns() {
@@ -39,7 +35,6 @@ tokens_count_post_summary_turns() {
     tokens_count_user_turns "$path"
     return
   fi
-  # Find the line number of the last summary record, count user turns after it
   local summary_line
   summary_line=$(grep -n '"type":"summary"' "$path" 2>/dev/null | tail -1 | cut -d: -f1)
   if [[ -z "$summary_line" ]]; then
@@ -53,38 +48,30 @@ tokens_count_post_summary_turns() {
 
 tokens_session_age_minutes() {
   local path="$1"
-  local ts
-  ts=$(head -1 "$path" 2>/dev/null | python3 -c "
-import sys, json
-from datetime import datetime, timezone
-line = sys.stdin.readline()
-if not line.strip():
-    print(0)
-    sys.exit(0)
-obj = json.loads(line)
-ts = obj.get('timestamp', '')
-if not ts:
-    print(0)
-    sys.exit(0)
-dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-age = (datetime.now(timezone.utc) - dt).total_seconds() / 60
-print(int(age))
-" 2>/dev/null) || echo "0"
-  echo "$ts"
+  local first_ts
+  first_ts=$(head -1 "$path" 2>/dev/null | jq -r '.timestamp // empty' 2>/dev/null)
+  if [[ -z "$first_ts" ]]; then
+    echo "0"
+    return
+  fi
+  # Parse ISO timestamp to epoch seconds
+  local ts_epoch now_epoch
+  ts_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${first_ts%%.*}" "+%s" 2>/dev/null) || \
+    ts_epoch=$(date -d "${first_ts}" "+%s" 2>/dev/null) || { echo "0"; return; }
+  now_epoch=$(date "+%s")
+  echo $(( (now_epoch - ts_epoch) / 60 ))
 }
 
 # Extract compaction summary text length (0 if not compacted)
 tokens_summary_length() {
   local path="$1"
-  head -10 "$path" 2>/dev/null | grep '"type":"summary"' | head -1 | python3 -c "
-import sys, json
-line = sys.stdin.readline()
-if not line.strip():
-    print(0)
-    sys.exit(0)
-obj = json.loads(line)
-print(len(obj.get('summary', '')))
-" 2>/dev/null || echo "0"
+  local line
+  line=$(head -10 "$path" 2>/dev/null | grep '"type":"summary"' | head -1)
+  if [[ -z "$line" ]]; then
+    echo "0"
+    return
+  fi
+  echo "$line" | jq '.summary | length' 2>/dev/null || echo "0"
 }
 
 tokens_resolve_transcript() {

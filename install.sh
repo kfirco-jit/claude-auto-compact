@@ -47,13 +47,11 @@ else
   echo ""
   echo "Installing decant..."
   if [[ -d "$DECANT_DIR" ]]; then
-    cd "$DECANT_DIR" && git pull 2>/dev/null || true
+    (cd "$DECANT_DIR" && git pull 2>/dev/null || true)
   else
     git clone https://github.com/TKasperczyk/decant.git "$DECANT_DIR"
   fi
-  cd "$DECANT_DIR"
-  python3 -m venv .venv
-  .venv/bin/pip install -e . -q
+  (cd "$DECANT_DIR" && python3 -m venv .venv && .venv/bin/pip install -e . -q)
   echo "[OK] Decant installed"
 fi
 
@@ -67,6 +65,9 @@ cp "$REPO_DIR/hooks/session-end-compact.sh" "$INSTALL_DIR/hooks/"
 cp "$REPO_DIR/hooks/lib/platform.sh" "$INSTALL_DIR/hooks/lib/"
 cp "$REPO_DIR/hooks/lib/config.sh" "$INSTALL_DIR/hooks/lib/"
 cp "$REPO_DIR/hooks/lib/tokens.sh" "$INSTALL_DIR/hooks/lib/"
+cp "$REPO_DIR/hooks/lib/strategy.py" "$INSTALL_DIR/hooks/lib/"
+cp "$REPO_DIR/hooks/lib/compact-runner.sh" "$INSTALL_DIR/hooks/lib/"
+cp "$REPO_DIR/hooks/lib/strategy-resolve.sh" "$INSTALL_DIR/hooks/lib/"
 cp "$REPO_DIR/bin/auto-compact" "$INSTALL_DIR/bin/"
 cp "$REPO_DIR/config/default.json" "$INSTALL_DIR/config/"
 cp "$REPO_DIR/config/schema.json" "$INSTALL_DIR/config/"
@@ -81,18 +82,21 @@ else
   echo "[OK] Existing config preserved at $INSTALL_DIR/config.json"
 fi
 
-# Merge hooks into settings.json
+# Merge hooks into settings.json (with backup)
 echo ""
 if [[ ! -f "$SETTINGS_FILE" ]]; then
   echo '{}' > "$SETTINGS_FILE"
 fi
 
+# Backup before modification
+cp "$SETTINGS_FILE" "${SETTINGS_FILE}.bak"
+
 STOP_HOOK='{"hooks":[{"type":"command","command":"$HOME/.claude/hooks/partial-compact/hooks/stop-monitor.sh"}]}'
 END_HOOK='{"hooks":[{"type":"command","command":"$HOME/.claude/hooks/partial-compact/hooks/session-end-compact.sh","timeout":10}]}'
 
+UPDATED=""
 if grep -q "partial-compact" "$SETTINGS_FILE" 2>/dev/null; then
   echo "Updating hooks in $SETTINGS_FILE..."
-  # Remove old entries, then add fresh ones
   UPDATED=$(jq \
     --argjson stop_hook "$STOP_HOOK" \
     --argjson end_hook "$END_HOOK" \
@@ -100,8 +104,6 @@ if grep -q "partial-compact" "$SETTINGS_FILE" 2>/dev/null; then
     .hooks.Stop = [(.hooks.Stop // [] | .[] | select(.hooks[0].command | test("partial-compact") | not))] + [$stop_hook] |
     .hooks.SessionEnd = [(.hooks.SessionEnd // [] | .[] | select(.hooks[0].command | test("partial-compact") | not))] + [$end_hook]
     ' "$SETTINGS_FILE")
-  echo "$UPDATED" > "$SETTINGS_FILE"
-  echo "[OK] Hooks updated in $SETTINGS_FILE"
 else
   echo "Registering hooks in $SETTINGS_FILE..."
   UPDATED=$(jq \
@@ -109,8 +111,17 @@ else
     --argjson end_hook "$END_HOOK" \
     '.hooks.Stop = (.hooks.Stop // []) + [$stop_hook] | .hooks.SessionEnd = (.hooks.SessionEnd // []) + [$end_hook]' \
     "$SETTINGS_FILE")
+fi
+
+# Atomic write: validate before overwriting
+if [[ -n "$UPDATED" ]] && echo "$UPDATED" | jq empty 2>/dev/null; then
   echo "$UPDATED" > "$SETTINGS_FILE"
+  rm -f "${SETTINGS_FILE}.bak"
   echo "[OK] Hooks registered"
+else
+  echo "[FAIL] Failed to update $SETTINGS_FILE — restoring backup"
+  mv "${SETTINGS_FILE}.bak" "$SETTINGS_FILE"
+  exit 1
 fi
 
 # Symlink CLI

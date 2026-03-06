@@ -44,10 +44,19 @@ if [[ -d "$INSTALL_DIR" ]]; then
   read -p "Remove $INSTALL_DIR? [Y/n] " -n 1 -r
   echo ""
   if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    rm -rf "$INSTALL_DIR"
-    echo "[OK] Removed $INSTALL_DIR"
+    if [[ "$INSTALL_DIR" == "$HOME/.claude/hooks/partial-compact" ]]; then
+      rm -rf "$INSTALL_DIR"
+      echo "[OK] Removed $INSTALL_DIR"
+    else
+      echo "[FAIL] Unexpected install dir: $INSTALL_DIR — skipping removal"
+    fi
   fi
 fi
+
+# Clean up tmp files
+rm -f /tmp/auto-compact-*.lock/pid 2>/dev/null || true
+rmdir /tmp/auto-compact-*.lock 2>/dev/null || true
+rm -f /tmp/auto-compact-stats-* 2>/dev/null || true
 
 # Optionally remove decant
 DECANT_DIR="$HOME/.claude/tools/decant"

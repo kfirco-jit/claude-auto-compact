@@ -2,18 +2,24 @@
 """Analyze session to decide optimal compaction strategy (topic vs last N)."""
 
 import json
+import signal
 import sys
 
 from decant.auth import create_client, is_oauth_client, CLAUDE_CODE_SYSTEM_PROMPT
 from decant.models import MODELS
 
+MAX_TEXT = 300
+MAX_TRANSCRIPT_CHARS = 400_000
+MIN_EXCHANGES = 5
+API_TIMEOUT_SECONDS = 30
 
-def extract_exchanges(session_path, max_text=300):
+
+def extract_exchanges(session_path):
     """Extract user messages with metadata about assistant responses."""
     exchanges = []
     pending_user = None
 
-    with open(session_path) as f:
+    with open(session_path, encoding="utf-8") as f:
         for line in f:
             try:
                 record = json.loads(line)
@@ -21,10 +27,8 @@ def extract_exchanges(session_path, max_text=300):
                 continue
 
             if record.get("type") == "user":
-                # Save previous exchange if exists
                 if pending_user is not None:
                     exchanges.append(pending_user)
-                # Extract user text (could be plain text or tool_result)
                 content = record.get("message", {}).get("content", [])
                 text = ""
                 for block in content:
@@ -36,7 +40,6 @@ def extract_exchanges(session_path, max_text=300):
                             text = block.get("text", "")
                             break
                         if block.get("type") == "tool_result":
-                            # Tool results are user messages in Claude's format
                             inner = block.get("content", "")
                             if isinstance(inner, list):
                                 for ib in inner:
@@ -47,7 +50,7 @@ def extract_exchanges(session_path, max_text=300):
                                 text = f"[tool result] {inner}"
                             break
                 full_len = len(text)
-                text = text[:max_text].replace("\n", " ").strip()
+                text = text[:MAX_TEXT].replace("\n", " ").strip()
                 pending_user = {
                     "text": text or "(continuation)",
                     "full_len": full_len,
@@ -62,18 +65,16 @@ def extract_exchanges(session_path, max_text=300):
                         continue
                     if block.get("type") == "tool_use":
                         name = block.get("name", "unknown")
-                        # Add brief tool context
                         inp = block.get("input", {})
                         detail = ""
                         if name in ("Read", "Write", "Edit", "Glob"):
-                            detail = inp.get("file_path", inp.get("pattern", ""))
+                            detail = inp.get("file_path", inp.get("pattern", ""))[:80]
                         elif name == "Bash":
-                            cmd = inp.get("command", "")
-                            detail = cmd[:80]
+                            detail = inp.get("command", "")[:80]
                         elif name == "Grep":
-                            detail = inp.get("pattern", "")
+                            detail = inp.get("pattern", "")[:80]
                         elif name == "Task":
-                            detail = inp.get("description", "")
+                            detail = inp.get("description", "")[:80]
                         if detail:
                             pending_user["tools_used"].append(f"{name}:{detail}")
                         else:
@@ -90,7 +91,7 @@ def extract_exchanges(session_path, max_text=300):
 def format_exchange(index, total, ex):
     """Format a single exchange for the transcript."""
     parts = [f"[{index}/{total}] {ex['text']}"]
-    if ex["full_len"] > 300:
+    if ex["full_len"] > MAX_TEXT:
         parts.append(f"  (message truncated, full length: {ex['full_len']} chars)")
     if ex["tools_used"]:
         tools = ", ".join(ex["tools_used"][:8])
@@ -105,18 +106,15 @@ def format_exchange(index, total, ex):
 def decide_strategy(session_path, keep_last_default):
     exchanges = extract_exchanges(session_path)
 
-    if len(exchanges) < 5:
+    if len(exchanges) < MIN_EXCHANGES:
         return {"mode": "last", "last": keep_last_default}
 
     total = len(exchanges)
     full_transcript = "\n\n".join(
         format_exchange(i + 1, total, ex) for i, ex in enumerate(exchanges)
     )
-    # Truncate if too long for haiku's context (~200K tokens ≈ ~600K chars).
-    # Keep first and last portions so haiku sees the session arc.
-    max_chars = 400_000
-    if len(full_transcript) > max_chars:
-        half = max_chars // 2
+    if len(full_transcript) > MAX_TRANSCRIPT_CHARS:
+        half = MAX_TRANSCRIPT_CHARS // 2
         transcript = (
             full_transcript[:half]
             + f"\n\n[... {total} exchanges total, middle truncated ...]\n\n"
@@ -157,24 +155,38 @@ def decide_strategy(session_path, keep_last_default):
     if is_oauth_client(client):
         system = CLAUDE_CODE_SYSTEM_PROMPT + "\n\n" + system
 
-    response = client.messages.create(
-        model=MODELS["haiku"],
-        max_tokens=256,
-        system=system,
-        messages=[{
-            "role": "user",
-            "content": f"Session has {total} exchanges.\n\n{transcript}",
-        }],
-    )
-
-    text = response.content[0].text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.startswith("```")]
-        text = "\n".join(lines).strip()
+    # Timeout to prevent hanging on API issues
+    old_handler = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+    signal.alarm(API_TIMEOUT_SECONDS)
     try:
-        result = json.loads(text)
+        response = client.messages.create(
+            model=MODELS["haiku"],
+            max_tokens=256,
+            system=system,
+            messages=[{
+                "role": "user",
+                "content": f"Session has {total} exchanges.\n\n{transcript}",
+            }],
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+    if not response.content:
+        return {"mode": "last", "last": keep_last_default}
+
+    raw_response = response.content[0].text.strip()
+    # Strip markdown code fences if wrapping the response
+    if raw_response.startswith("```"):
+        lines = raw_response.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw_response = "\n".join(lines).strip()
+
+    try:
+        result = json.loads(raw_response)
         cut = result.get("cut_before_index")
         if isinstance(cut, int) and 1 < cut <= total:
             result["last"] = total - cut + 1
@@ -185,7 +197,7 @@ def decide_strategy(session_path, keep_last_default):
             return result
         result["mode"] = "last"
         return result
-    except (json.JSONDecodeError, KeyError):
+    except json.JSONDecodeError:
         pass
 
     return {"mode": "last", "last": keep_last_default}
@@ -194,14 +206,13 @@ def decide_strategy(session_path, keep_last_default):
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(json.dumps({"mode": "last", "last": 10, "error": "usage: strategy.py <session> <keep_last>"}))
-        sys.exit(0)
-
-    session_path = sys.argv[1]
-    keep_last = int(sys.argv[2])
+        sys.exit(1)
 
     try:
+        session_path = sys.argv[1]
+        keep_last = int(sys.argv[2])
         result = decide_strategy(session_path, keep_last)
     except Exception as e:
-        result = {"mode": "last", "last": keep_last, "fallback": True, "error": str(e)}
+        result = {"mode": "last", "last": int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 10, "fallback": True, "error": str(e)}
 
     print(json.dumps(result))

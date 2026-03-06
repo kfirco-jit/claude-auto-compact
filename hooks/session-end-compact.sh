@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/platform.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/tokens.sh"
+source "$SCRIPT_DIR/lib/strategy-resolve.sh"
 
 HOOK_INPUT=$(cat)
 
@@ -17,6 +18,7 @@ if [[ "$REASON" == "clear" ]]; then
 fi
 
 CWD=$(echo "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 config_load "$CWD"
 config_validate 2>/dev/null || exit 0
 
@@ -59,14 +61,20 @@ if [[ "$KEEP_LAST" -ge "$USER_TURNS" ]] 2>/dev/null; then
   KEEP_LAST=$((USER_TURNS > 1 ? USER_TURNS - 1 : 1))
 fi
 
-# Lock file to prevent concurrent runs
-LOCK_FILE="/tmp/auto-compact-$(platform_md5 "$TRANSCRIPT_PATH").lock"
-if [[ -f "$LOCK_FILE" ]]; then
-  LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-  if kill -0 "$LOCK_PID" 2>/dev/null; then
-    exit 0
+# Atomic lock via mkdir (prevents TOCTOU race)
+LOCK_DIR="/tmp/auto-compact-$(platform_md5 "$TRANSCRIPT_PATH").lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  # Check if holder is still alive
+  LOCK_PID_FILE="$LOCK_DIR/pid"
+  if [[ -f "$LOCK_PID_FILE" ]]; then
+    LOCK_PID=$(cat "$LOCK_PID_FILE" 2>/dev/null)
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+      exit 0
+    fi
   fi
-  rm -f "$LOCK_FILE"
+  # Stale lock — remove and retry
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
 
 # Dry run check
@@ -75,15 +83,16 @@ if [[ "$DRY_RUN" == "true" ]]; then
   WINDOW=$(config_get '.context_window_tokens')
   PCT=$((TOKENS * 100 / WINDOW))
   echo "[auto-compact] DRY RUN: Would compact session (~${PCT}%, ${USER_TURNS} turns, keep last ${KEEP_LAST})" >&2
+  rm -rf "$LOCK_DIR"
   exit 0
 fi
 
-# Log rotation
+# Log rotation (keep exactly MAX_FILES logs)
 LOG_DIR=$(config_log_dir)
 mkdir -p "$LOG_DIR" 2>/dev/null
 MAX_FILES=$(config_get '.logging.max_files')
 if [[ -d "$LOG_DIR" ]]; then
-  ls -t "$LOG_DIR"/*.log 2>/dev/null | tail -n +$((MAX_FILES)) | xargs rm -f 2>/dev/null || true
+  ls -t "$LOG_DIR"/*.log 2>/dev/null | tail -n +$((MAX_FILES + 1)) | xargs rm -f 2>/dev/null || true
 fi
 
 # Build and run decant
@@ -92,31 +101,8 @@ STRIP=$(config_get '.compaction.strip_noise')
 STRATEGY=$(config_get '.compaction.strategy')
 LOG_FILE="$LOG_DIR/compact-$(date +%Y%m%d-%H%M%S).log"
 
-# Determine compaction boundary (--last N or --topic)
-BOUNDARY_ARGS="--last $KEEP_LAST"
-BOUNDARY_DESC="kept last $KEEP_LAST turns"
-if [[ "$STRATEGY" == "auto" ]]; then
-  DECANT_PYTHON="$(dirname "$DECANT_BIN")/../.venv/bin/python3"
-  STRATEGY_SCRIPT="$SCRIPT_DIR/lib/strategy.py"
-  if [[ -x "$DECANT_PYTHON" ]] && [[ -f "$STRATEGY_SCRIPT" ]]; then
-    STRATEGY_RESULT=$("$DECANT_PYTHON" "$STRATEGY_SCRIPT" "$TRANSCRIPT_PATH" "$KEEP_LAST" 2>/dev/null) || true
-    STRATEGY_MODE=$(echo "$STRATEGY_RESULT" | jq -r '.mode // empty' 2>/dev/null)
-    STRATEGY_LAST=$(echo "$STRATEGY_RESULT" | jq -r '.last // empty' 2>/dev/null)
-    # Update keep_last if haiku recommended a different value
-    if [[ -n "$STRATEGY_LAST" ]] && [[ "$STRATEGY_LAST" -gt 0 ]] 2>/dev/null; then
-      KEEP_LAST="$STRATEGY_LAST"
-      BOUNDARY_ARGS="--last $KEEP_LAST"
-      BOUNDARY_DESC="kept last $KEEP_LAST turns"
-    fi
-    if [[ "$STRATEGY_MODE" == "topic" ]]; then
-      STRATEGY_TOPIC=$(echo "$STRATEGY_RESULT" | jq -r '.topic // empty' 2>/dev/null)
-      if [[ -n "$STRATEGY_TOPIC" ]]; then
-        BOUNDARY_ARGS="--topic '$STRATEGY_TOPIC'"
-        BOUNDARY_DESC="topic: $STRATEGY_TOPIC (fallback: last $KEEP_LAST)"
-      fi
-    fi
-  fi
-fi
+# Determine compaction boundary via shared strategy resolution
+strategy_resolve "$TRANSCRIPT_PATH" "$SCRIPT_DIR/.."
 
 NOTIFY_ENABLED=$(config_get '.notifications.enabled')
 NOTIFY_COMPACT=$(config_get '.notifications.on_compaction')
@@ -129,21 +115,24 @@ RUNNER="$SCRIPT_DIR/lib/compact-runner.sh"
 nohup env \
   DECANT_BIN="$DECANT_BIN" \
   TRANSCRIPT_PATH="$TRANSCRIPT_PATH" \
-  BOUNDARY_ARGS="$BOUNDARY_ARGS" \
   MODEL="$MODEL" \
   STRIP="$STRIP" \
   KEEP_LAST="$KEEP_LAST" \
   BEFORE_SIZE="$BEFORE_SIZE" \
   TARGET_PCT="${TARGET_PCT:-50}" \
   MAX_ROUNDS="${MAX_ROUNDS:-3}" \
-  PLATFORM="$__PLATFORM" \
   NOTIFY_ENABLED="$NOTIFY_ENABLED" \
   NOTIFY_COMPACT="$NOTIFY_COMPACT" \
+  BOUNDARY_MODE="$BOUNDARY_MODE" \
+  BOUNDARY_LAST="$BOUNDARY_LAST" \
+  BOUNDARY_TOPIC="$BOUNDARY_TOPIC" \
   BOUNDARY_DESC="$BOUNDARY_DESC" \
-  LOCK_FILE="$LOCK_FILE" \
+  SESSION_ID="$SESSION_ID" \
+  LOG_DIR="$LOG_DIR" \
+  LOCK_DIR="$LOCK_DIR" \
   bash -c "
-    echo \$\$ > '$LOCK_FILE'
-    trap 'rm -f \"$LOCK_FILE\"' EXIT
+    echo \$\$ > '$LOCK_DIR/pid'
+    trap 'rm -rf \"$LOCK_DIR\"' EXIT
     bash '$RUNNER'
   " > "$LOG_FILE" 2>&1 &
 

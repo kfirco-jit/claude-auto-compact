@@ -2,7 +2,6 @@
 # Test runner for claude-auto-compact
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TOTAL_PASS=0
 TOTAL_FAIL=0
 
 for test_file in "$SCRIPT_DIR"/test-*.sh; do

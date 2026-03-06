@@ -24,8 +24,11 @@ config_find_install_dir() {
 
 config_load() {
   local cwd="${1:-}"
+  local install_dir="${2:-}"
 
-  if [[ -z "$__INSTALL_DIR" ]]; then
+  if [[ -n "$install_dir" ]]; then
+    __INSTALL_DIR="$install_dir"
+  elif [[ -z "$__INSTALL_DIR" ]]; then
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     __INSTALL_DIR=$(config_find_install_dir "$script_dir") || return 1
@@ -113,6 +116,20 @@ config_validate() {
   strategy=$(config_get '.compaction.strategy')
   if [[ "$strategy" != "auto" ]] && [[ "$strategy" != "last" ]]; then
     echo "[auto-compact] config: strategy must be 'auto' or 'last', got '$strategy'" >&2
+    errors=1
+  fi
+
+  local target_pct
+  target_pct=$(config_get '.compaction.target_pct')
+  if [[ "$target_pct" -lt 10 ]] 2>/dev/null || [[ "$target_pct" -gt 90 ]] 2>/dev/null; then
+    echo "[auto-compact] config: target_pct must be 10-90, got '$target_pct'" >&2
+    errors=1
+  fi
+
+  local max_rounds
+  max_rounds=$(config_get '.compaction.max_rounds')
+  if [[ "$max_rounds" -lt 1 ]] 2>/dev/null || [[ "$max_rounds" -gt 5 ]] 2>/dev/null; then
+    echo "[auto-compact] config: max_rounds must be 1-5, got '$max_rounds'" >&2
     errors=1
   fi
 
